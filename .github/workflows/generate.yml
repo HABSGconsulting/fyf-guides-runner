@@ -1,0 +1,87 @@
+name: Generate Content (Worker)
+
+on:
+  schedule:
+    - cron: '0 1 * * *'    # 6:30 AM IST daily
+  workflow_dispatch:
+    inputs:
+      series:
+        description: 'Series ID (e.g. mind-over-markets)'
+        required: true
+        default: 'mind-over-markets'
+        type: string
+      count:
+        description: 'Number of sections to generate'
+        required: true
+        default: '1'
+        type: string
+      dry_run:
+        description: 'Dry run — call Gemini but write nothing'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      section:
+        description: 'Force a specific section ID for manual retry (e.g. 3.2.4)'
+        required: false
+        type: string
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout private engine repo
+        uses: actions/checkout@v4
+        with:
+          repository: HABSGconsulting/fyf-guides-engine
+          token: ${{ secrets.GH_PAT }}
+          path: engine
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: engine/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r engine/requirements.txt
+
+      - name: Configure Git
+        working-directory: engine
+        run: |
+          git config user.name  "fyf-worker-bot"
+          git config user.email "bot@fundyourfreedom.in"
+
+      - name: Run Worker
+        working-directory: engine
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          FLAGS=""
+          if [ "${{ inputs.dry_run }}" = "true" ]; then FLAGS="$FLAGS --dry-run"; fi
+          if [ -n "${{ inputs.section }}" ];       then FLAGS="$FLAGS --section ${{ inputs.section }}"; fi
+
+          python scripts/worker.py \
+            --series "${{ inputs.series || 'mind-over-markets' }}" \
+            --count  "${{ inputs.count  || '1' }}" \
+            $FLAGS
+
+      - name: Alert on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_PAT }}
+          script: |
+            await github.rest.issues.create({
+              owner: 'HABSGconsulting',
+              repo:  'fyf-guides-engine',
+              title: `[Worker] Run failed \u2014 ${new Date().toISOString().slice(0,10)}`,
+              body:  `Worker run failed (series: ${{ inputs.series }}, count: ${{ inputs.count }}).\n\n[View logs](${context.serverUrl}/HABSGconsulting/fyf-guides-runner/actions/runs/${context.runId})`,
+              labels: ['bug']
+            })
